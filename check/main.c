@@ -2187,7 +2187,11 @@ static int add_missing_dir_index(struct btrfs_root *root,
 	key.type = BTRFS_DIR_INDEX_KEY;
 	key.offset = backref->index;
 	ret = btrfs_insert_empty_item(trans, root, &path, &key, data_size);
-	BUG_ON(ret);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
+		return ret;
+	}
 
 	leaf = path.nodes[0];
 	dir_item = btrfs_item_ptr(leaf, path.slots[0], struct btrfs_dir_item);
@@ -2204,7 +2208,12 @@ static int add_missing_dir_index(struct btrfs_root *root,
 	write_extent_buffer(leaf, backref->name, name_ptr, backref->namelen);
 	btrfs_mark_buffer_dirty(leaf);
 	btrfs_release_path(&path);
-	btrfs_commit_transaction(trans, root);
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
+		return ret;
+	}
 
 	backref->found_dir_index = 1;
 	dir_rec = get_inode_rec(inode_cache, backref->dir, 0);
@@ -2258,7 +2267,11 @@ static int delete_dir_index(struct btrfs_root *root,
 		ret = btrfs_delete_one_dir_name(trans, root, &path, di);
 	BUG_ON(ret);
 	btrfs_release_path(&path);
-	btrfs_commit_transaction(trans, root);
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
+	}
 	return ret;
 }
 
@@ -2295,8 +2308,18 @@ static int create_inode_item(struct btrfs_root *root,
 
 	ret = insert_inode_item(trans, root, rec->ino, size, rec->nbytes,
 				  nlink, mode);
-	btrfs_commit_transaction(trans, root);
-	return 0;
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
+		return ret;
+	}
+
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
+	}
+	return ret;
 }
 
 static int repair_inode_backrefs(struct btrfs_root *root,
@@ -2390,8 +2413,17 @@ static int repair_inode_backrefs(struct btrfs_root *root,
 						    backref->dir, &location,
 						    imode_to_type(rec->imode),
 						    backref->index);
-			BUG_ON(ret);
-			btrfs_commit_transaction(trans, root);
+			if (ret < 0) {
+				btrfs_abort_transaction(trans, ret);
+				btrfs_commit_transaction(trans, root);
+				break;
+			}
+			ret = btrfs_commit_transaction(trans, root);
+			if (ret < 0) {
+				errno = -ret;
+				error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+				break;
+			}
 			repaired++;
 		}
 
@@ -3074,8 +3106,12 @@ static int try_repair_inode(struct btrfs_root *root, struct inode_record *rec)
 		ret = repair_unaligned_extent_recs(trans, root, &path, rec);
 	if (!ret && rec->errors & I_ERR_INVALID_GEN)
 		ret = repair_inode_gen_original(trans, root, &path, rec);
-	btrfs_commit_transaction(trans, root);
 	btrfs_release_path(&path);
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	}
 	return ret;
 }
 
@@ -3184,7 +3220,12 @@ static int check_inode_recs(struct btrfs_root *root,
 				return ret;
 			}
 
-			btrfs_commit_transaction(trans, root);
+			ret = btrfs_commit_transaction(trans, root);
+			if (ret < 0) {
+				errno = -ret;
+				error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+				return ret;
+			}
 			return -EAGAIN;
 		}
 
@@ -3662,8 +3703,12 @@ static int repair_btree(struct btrfs_root *root,
 		cache = next_cache_extent(cache);
 	}
 out:
-	btrfs_commit_transaction(trans, root);
 	btrfs_release_path(&path);
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	}
 	return ret;
 }
 
@@ -4605,6 +4650,7 @@ static int try_to_fix_bad_block(struct btrfs_root *root,
 		ret = btrfs_search_slot(trans, search_root, &key, &path, 0, 1);
 		if (ret) {
 			ret = -EIO;
+			btrfs_abort_transaction(trans, ret);
 			btrfs_commit_transaction(trans, search_root);
 			break;
 		}
@@ -4613,11 +4659,17 @@ static int try_to_fix_bad_block(struct btrfs_root *root,
 		else if (status == BTRFS_TREE_BLOCK_INVALID_OFFSETS)
 			ret = fix_item_offset(search_root, &path);
 		if (ret) {
+			btrfs_abort_transaction(trans, ret);
 			btrfs_commit_transaction(trans, search_root);
 			break;
 		}
 		btrfs_release_path(&path);
-		btrfs_commit_transaction(trans, search_root);
+		ret = btrfs_commit_transaction(trans, search_root);
+		if (ret < 0) {
+			errno = -ret;
+			error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+			break;
+		}
 	}
 	ulist_free(roots);
 	btrfs_release_path(&path);
@@ -7843,6 +7895,7 @@ retry:
 	ret = btrfs_search_slot(trans, root, &key, &path, 0, 1);
 	if (ret < 0) {
 		btrfs_release_path(&path);
+		btrfs_abort_transaction(trans, ret);
 		btrfs_commit_transaction(trans, root);
 		return ret;
 	} else if (ret) {
@@ -7852,7 +7905,12 @@ retry:
 		}
 		fprintf(stderr, "Didn't find extent for %llu\n", rec->start);
 		btrfs_release_path(&path);
-		btrfs_commit_transaction(trans, root);
+		ret = btrfs_commit_transaction(trans, root);
+		if (ret < 0) {
+			errno = -ret;
+			error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+			return ret;
+		}
 		return -ENOENT;
 	}
 
@@ -7870,8 +7928,12 @@ retry:
 	btrfs_mark_buffer_dirty(path.nodes[0]);
 	btrfs_release_path(&path);
 	ret = btrfs_commit_transaction(trans, root);
-	if (!ret)
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	} else {
 		fprintf(stderr, "Repaired extent flags for %llu\n", rec->start);
+	}
 
 	return ret;
 }
@@ -7950,7 +8012,7 @@ static int prune_corrupt_blocks(void)
 	struct btrfs_trans_handle *trans = NULL;
 	struct cache_extent *cache;
 	struct btrfs_corrupt_block *corrupt;
-	int ret;
+	int ret = 0;
 
 	while (1) {
 		cache = search_cache_extent(gfs_info->corrupt_blocks, 0);
@@ -7969,9 +8031,14 @@ static int prune_corrupt_blocks(void)
 		prune_one_block(trans, corrupt);
 		remove_cache_extent(gfs_info->corrupt_blocks, cache);
 	}
-	if (trans)
-		return btrfs_commit_transaction(trans, gfs_info->tree_root);
-	return 0;
+	if (trans) {
+		ret = btrfs_commit_transaction(trans, gfs_info->tree_root);
+		if (ret < 0) {
+			errno = -ret;
+			error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+		}
+	}
+	return ret;
 }
 
 static int record_unaligned_extent_rec(struct extent_record *rec)
@@ -8096,13 +8163,19 @@ static int repair_extent_item_generation(struct extent_record *rec)
 	/* Not possible */
 	if (ret == 0)
 		ret = -EUCLEAN;
-	if (ret < 0)
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, extent_root);
 		goto out;
+	}
 	ret = btrfs_previous_extent_item(extent_root, &path, rec->start);
 	if (ret > 0)
 		ret = -ENOENT;
-	if (ret < 0)
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, extent_root);
 		goto out;
+	}
 
 	if (!new_gen)
 		new_gen = trans->transid;
@@ -8120,10 +8193,6 @@ static int repair_extent_item_generation(struct extent_record *rec)
 	rec->generation = new_gen;
 out:
 	btrfs_release_path(&path);
-	if (ret < 0) {
-		btrfs_abort_transaction(trans, ret);
-		btrfs_commit_transaction(trans, extent_root);
-	}
 	return ret;
 }
 
@@ -8343,8 +8412,11 @@ repair_abort:
 				goto repair_abort;
 			}
 			ret = btrfs_commit_transaction(trans, root);
-			if (ret)
+			if (ret < 0) {
+				errno = -ret;
+				error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
 				goto repair_abort;
+			}
 		}
 		return ret;
 	}
@@ -8826,8 +8898,18 @@ static int check_block_groups(struct block_group_tree *bg_cache)
 	}
 
 	ret = btrfs_fix_block_accounting(trans);
-	btrfs_commit_transaction(trans, gfs_info->tree_root);
-	return ret ? ret : -EAGAIN;
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, gfs_info->tree_root);
+		return ret;
+	}
+	ret = btrfs_commit_transaction(trans, gfs_info->tree_root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+		return ret;
+	}
+	return -EAGAIN;
 }
 
 /**
@@ -9646,14 +9728,24 @@ static int delete_bad_item(struct btrfs_root *root, struct bad_item *bad)
 	}
 
 	ret = btrfs_search_slot(trans, root, &bad->key, &path, -1, 1);
-	if (ret) {
-		if (ret > 0)
-			ret = 0;
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
 		goto out;
 	}
+	if (ret > 0) {
+		ret = 0;
+		goto out_commit;
+	}
 	ret = btrfs_del_item(trans, root, &path);
-out:
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
+		goto out;
+	}
+out_commit:
 	btrfs_commit_transaction(trans, root);
+out:
 	btrfs_release_path(&path);
 	return ret;
 }
@@ -9998,8 +10090,14 @@ next:
 out:
 	free_roots_info_cache();
 	btrfs_release_path(&path);
-	if (trans)
-		btrfs_commit_transaction(trans, gfs_info->tree_root);
+	if (trans) {
+		ret = btrfs_commit_transaction(trans, gfs_info->tree_root);
+		if (ret < 0) {
+			errno = -ret;
+			error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+			return ret;
+		}
+	}
 	if (ret < 0)
 		return ret;
 

@@ -727,7 +727,7 @@ int reset_imode(struct btrfs_trans_handle *trans, struct btrfs_root *root,
 	iitem = btrfs_item_ptr(leaf, slot, struct btrfs_inode_item);
 	btrfs_set_inode_mode(leaf, iitem, mode);
 	btrfs_mark_buffer_dirty(leaf);
-	return ret;
+	return 0;
 }
 
 static int find_file_type_dir_index(struct btrfs_root *root, u64 ino, u64 dirid,
@@ -1006,16 +1006,20 @@ int repair_imode_common(struct btrfs_root *root, struct btrfs_path *path)
 	btrfs_release_path(path);
 
 	ret = reset_imode(trans, root, path, key.objectid, imode);
-	if (ret < 0)
-		goto abort;
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
+		return ret;
+	}
 	ret = btrfs_commit_transaction(trans, root);
-	if (!ret)
-		printf("reset mode for inode %llu root %llu\n",
-			key.objectid, root->root_key.objectid);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+		return ret;
+	}
+	printf("reset mode for inode %llu root %llu\n",
+	       key.objectid, root->root_key.objectid);
 	return ret;
-abort:
-	btrfs_abort_transaction(trans, ret);
- 	return ret;
 }
 
 /*
@@ -1084,7 +1088,11 @@ int recow_extent_buffer(struct btrfs_root *root, struct extent_buffer *eb)
 		btrfs_item_key_to_cpu(eb, &key, 0);
 
 	ret = btrfs_search_slot(trans, root, &key, &path, 0, 1);
-	btrfs_commit_transaction(trans, root);
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	}
 	btrfs_release_path(&path);
 	return ret;
 }
@@ -1183,7 +1191,9 @@ int repair_dev_item_bytes_used(struct btrfs_fs_info *fs_info,
 	if (ret < 0) {
 		errno = -ret;
 		error("failed to update device item for devid %llu: %m", devid);
-		goto error;
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, fs_info->chunk_root);
+		return ret;
 	}
 
 	/*
@@ -1198,9 +1208,6 @@ int repair_dev_item_bytes_used(struct btrfs_fs_info *fs_info,
 		printf("reset devid %llu bytes_used to %llu\n", devid,
 		       device->bytes_used);
 	}
-	return ret;
-error:
-	btrfs_abort_transaction(trans, ret);
 	return ret;
 }
 

@@ -362,7 +362,9 @@ static int create_chunk_and_block_group(u64 flags, u64 *start, u64 *nbytes)
 	if (ret) {
 		errno = -ret;
 		error("fail to allocate new chunk %m");
-		goto out;
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
+		return ret;
 	}
 	ret = btrfs_make_block_group(trans, gfs_info, 0, flags, *start,
 				     *nbytes);
@@ -370,10 +372,16 @@ static int create_chunk_and_block_group(u64 flags, u64 *start, u64 *nbytes)
 		errno = -ret;
 		error("fail to make block group for chunk %llu %llu %m",
 		      *start, *nbytes);
-		goto out;
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
+		return ret;
 	}
-out:
-	btrfs_commit_transaction(trans, root);
+
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	}
 	return ret;
 }
 
@@ -577,26 +585,36 @@ static int delete_item(struct btrfs_root *root, struct btrfs_path *path)
 	btrfs_release_path(path);
 	ret = btrfs_search_slot(trans, root, &key, path, -1, 1);
 	if (ret) {
+		error("failed to delete root %llu item[%llu, %u, %llu]",
+		      root->objectid, key.objectid, key.type, key.offset);
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
 		ret = -ENOENT;
 		goto out;
 	}
 
 	ret = btrfs_del_item(trans, root, path);
-	if (ret)
+	if (ret) {
+		error("failed to delete root %llu item[%llu, %u, %llu]",
+		      root->objectid, key.objectid, key.type, key.offset);
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
 		goto out;
+	}
 
 	if (path->slots[0] == 0)
 		btrfs_prev_leaf(root, path);
 	else
 		path->slots[0]--;
-out:
-	btrfs_commit_transaction(trans, root);
-	if (ret)
-		error("failed to delete root %llu item[%llu, %u, %llu]",
-		      root->objectid, key.objectid, key.type, key.offset);
-	else
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	} else {
 		printf("Deleted root %llu item[%llu, %u, %llu]\n",
 		       root->objectid, key.objectid, key.type, key.offset);
+	}
+out:
 	return ret;
 }
 
@@ -620,7 +638,16 @@ static int repair_block_accounting(void)
 	}
 
 	ret = btrfs_fix_block_accounting(trans);
-	btrfs_commit_transaction(trans, gfs_info->tree_root);
+	if (ret < 0) {
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, gfs_info->tree_root);
+		return ret;
+	}
+	ret = btrfs_commit_transaction(trans, gfs_info->tree_root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	}
 	return ret;
 }
 
@@ -1031,6 +1058,12 @@ static int repair_ternary_lowmem(struct btrfs_root *root, u64 dir_ino, u64 ino,
 	UASSERT(stage < 3);
 
 	trans = btrfs_start_transaction(root, 1);
+	if (IS_ERR(trans)) {
+		ret = PTR_ERR(trans);
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
+		return ret;
+	}
 	if (stage == 2) {
 		ret = btrfs_unlink(trans, root, ino, dir_ino, index, name,
 				   name_len, 0);
@@ -1502,23 +1535,37 @@ static int repair_inode_item_missing(struct btrfs_root *root, u64 ino,
 
 	trans = btrfs_start_transaction(root, 1);
 	if (IS_ERR(trans)) {
-		ret = -EIO;
-		goto out;
+		ret = PTR_ERR(trans);
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
+		return ret;
 	}
 
 	ret = btrfs_search_slot(trans, root, &key, &path, 1, 1);
-	if (ret < 0 || !ret)
-		goto fail;
-
-	/* insert inode item */
-	create_inode_item_lowmem(trans, root, ino, filetype);
-	ret = 0;
-fail:
-	btrfs_commit_transaction(trans, root);
-out:
-	if (ret)
+	if (ret < 0 || !ret) {
 		error("failed to repair root %llu INODE ITEM[%llu] missing",
 		      root->objectid, ino);
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
+		goto out;
+	}
+
+	/* insert inode item */
+	ret = create_inode_item_lowmem(trans, root, ino, filetype);
+	if (ret < 0) {
+		error("failed to insert inode item %llu in root %llu",
+		      ino, root->objectid);
+		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
+		goto out;
+	}
+
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	}
+out:
 	btrfs_release_path(&path);
 	return ret;
 }
@@ -1545,12 +1592,13 @@ static int lowmem_delete_corrupted_dir_item(struct btrfs_root *root,
 	ret = delete_corrupted_dir_item(trans, root, di_key, namebuf, name_len);
 	if (ret < 0) {
 		btrfs_abort_transaction(trans, ret);
-	} else {
-		ret = btrfs_commit_transaction(trans, root);
-		if (ret < 0) {
-			errno = -ret;
-			error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
-		}
+		btrfs_commit_transaction(trans, root);
+		return ret;
+	}
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
 	}
 	return ret;
 }
@@ -1861,18 +1909,28 @@ static int punch_extent_hole(struct btrfs_root *root, struct btrfs_path *path,
 
 	btrfs_item_key_to_cpu(path->nodes[0], &key, path->slots[0]);
 	trans = btrfs_start_transaction(root, 1);
-	if (IS_ERR(trans))
+	if (IS_ERR(trans)) {
+		ret = PTR_ERR(trans);
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
 		return PTR_ERR(trans);
+	}
 
 	ret = btrfs_punch_hole(trans, root, ino, start, len);
 	if (ret) {
 		error("failed to add hole [%llu, %llu] in inode [%llu]",
 		      start, len, ino);
 		btrfs_abort_transaction(trans, ret);
+		btrfs_commit_transaction(trans, root);
 		return ret;
 	}
 	printf("Add a hole [%llu, %llu] in inode [%llu]\n", start, len, ino);
-	btrfs_commit_transaction(trans, root);
+	ret = btrfs_commit_transaction(trans, root);
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+		return ret;
+	}
 
 	btrfs_release_path(path);
 	ret = btrfs_search_slot(NULL, root, &key, path, 0, 0);
@@ -1894,6 +1952,8 @@ static int repair_inline_ram_bytes(struct btrfs_root *root,
 	trans = btrfs_start_transaction(root, 1);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
 		return ret;
 	}
 	btrfs_item_key_to_cpu(path->nodes[0], &key, path->slots[0]);
@@ -1922,7 +1982,10 @@ static int repair_inline_ram_bytes(struct btrfs_root *root,
 	btrfs_mark_buffer_dirty(path->nodes[0]);
 
 	ret = btrfs_commit_transaction(trans, root);
-	if (!ret) {
+	if (ret < 0) {
+		errno = -ret;
+		error_msg(ERROR_MSG_COMMIT_TRANS, "%m");
+	} else {
 		printf(
 	"Successfully repaired inline ram_bytes for root %llu ino %llu\n",
 			root->objectid, key.objectid);
@@ -2286,6 +2349,8 @@ static int repair_inode_nbytes_lowmem(struct btrfs_root *root,
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
 		err |= ret;
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
 		goto out;
 	}
 
@@ -2347,6 +2412,8 @@ static int repair_dir_isize_lowmem(struct btrfs_root *root,
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
 		err |= ret;
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
 		goto out;
 	}
 
@@ -2400,6 +2467,8 @@ static int repair_inode_orphan_item_lowmem(struct btrfs_root *root,
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
 		err |= ret;
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
 		goto out;
 	}
 
@@ -2458,6 +2527,8 @@ static int repair_inode_nlinks_lowmem(struct btrfs_root *root,
 	trans = btrfs_start_transaction(root, 1);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
+		errno = -ret;
+		error_msg(ERROR_MSG_START_TRANS, "%m");
 		goto out;
 	}
 
@@ -5159,6 +5230,8 @@ static int repair_fs_first_inode(struct btrfs_root *root, int err)
 		trans = btrfs_start_transaction(root, 1);
 		if (IS_ERR(trans)) {
 			ret = PTR_ERR(trans);
+			errno = -ret;
+			error_msg(ERROR_MSG_START_TRANS, "%m");
 			goto out;
 		}
 
