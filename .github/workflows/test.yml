@@ -27,3 +27,17 @@ jobs:
       - run: echo "::error::Test failed"
       - run: echo "It works :rocket:" >> $GITHUB_STEP_SUMMARY
       - run: tests/annotate.sh >> $GITHUB_STEP_SUMMARY
+  build-asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo modprobe btrfs
+      - run: sudo apt-get install -y pkg-config gcc liblzo2-dev libzstd-dev libblkid-dev uuid-dev zlib1g-dev libext2fs-dev e2fsprogs libudev-dev libaio-dev liburing-dev attr jq
+      - name: Configure
+        run: ./autogen.sh && ./configure --disable-documentation
+      - name: Make (D=asan)
+        run: make V=1 D=asan
+      - name: Tests mkfs (asan)
+        run: sudo make TEST_LOG=dump D=asan test-mkfs
+      - name: Scan results
+        run: cd tests && ./scan-results.txt
