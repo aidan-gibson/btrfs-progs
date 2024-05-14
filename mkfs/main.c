@@ -1655,6 +1655,11 @@ int BOX_MAIN(mkfs)(int argc, char **argv)
 		      opt_zoned ? "zoned mode " : "", min_dev_size);
 		goto error;
 	}
+	if (byte_count && opt_zoned && !IS_ALIGNED(byte_count, zone_size(file))) {
+		error("size %llu is not aligned to zone size %llu", byte_count,
+		      zone_size(file));
+		goto error;
+	}
 
 	for (i = saved_optind; i < saved_optind + device_count; i++) {
 		char *path;
