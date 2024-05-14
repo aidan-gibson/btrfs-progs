@@ -818,14 +818,51 @@ u64 btrfs_min_dev_size(u32 nodesize, bool mixed, u64 zone_size, u64 meta_profile
 	u64 meta_size;
 	u64 data_size;
 
-	/*
-	 * 2 zones for the primary superblock
-	 * 1 zone for the system block group
-	 * 1 zone for a metadata block group
-	 * 1 zone for a data block group
-	 */
-	if (zone_size)
-		return 5 * zone_size;
+	if (zone_size) {
+		/* 2 zones for the primary superblock. */
+		reserved += 2 * zone_size;
+
+		/*
+		 * 1 zone each for the initial system, metadata, and data block
+		 * group
+		 */
+		reserved += 3 * zone_size;
+
+		/*
+		 * non-SINGLE profile needs:
+		 * 1 zone for system block group
+		 * 1 zone for normal metadata block group
+		 * 1 zone for tree-log block group
+		 *
+		 * SINGLE profile only need to add tree-log block group
+		 */
+		if (meta_profile & BTRFS_BLOCK_GROUP_PROFILE_MASK)
+			meta_size = 3 * zone_size;
+		else
+			meta_size = zone_size;
+		/* DUP profile needs two zones for each block group. */
+		if (meta_profile & BTRFS_BLOCK_GROUP_DUP)
+			meta_size *= 2;
+		reserved += meta_size;
+
+		/*
+		 * non-SINGLE profile needs:
+		 * 1 zone for data block group
+		 * 1 zone for data relocation block group
+		 *
+		 * SINGLE profile only need to add data relocationblock group
+		 */
+		if (data_profile & BTRFS_BLOCK_GROUP_PROFILE_MASK)
+			data_size = 2 * zone_size;
+		else
+			data_size = zone_size;
+		/* DUP profile needs two zones for each block group. */
+		if (data_profile & BTRFS_BLOCK_GROUP_DUP)
+			data_size *= 2;
+		reserved += data_size;
+
+		return reserved;
+	}
 
 	if (mixed)
 		return 2 * (BTRFS_MKFS_SYSTEM_GROUP_SIZE +
