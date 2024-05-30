@@ -46,7 +46,7 @@ struct btrfs_trans_handle;
 #define ext2fs_get_block_bitmap_range2 ext2fs_get_block_bitmap_range
 #define ext2fs_inode_data_blocks2 ext2fs_inode_data_blocks
 #define ext2fs_read_ext_attr2 ext2fs_read_ext_attr
-#define ext2fs_blocks_count(s)		((s)->s_blocks_count)
+#define ext2fs_blocks_count(s)		((s)->s_blocks_count_hi << 32) | (s)->s_blocks_count)
 #define EXT2FS_CLUSTER_RATIO(fs)	(1)
 #define EXT2_CLUSTERS_PER_GROUP(s)	(EXT2_BLOCKS_PER_GROUP(s))
 #define EXT2FS_B2C(fs, blk)		(blk)

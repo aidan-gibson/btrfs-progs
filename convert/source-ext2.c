@@ -288,8 +288,8 @@ error:
 	return -1;
 }
 
-static int ext2_block_iterate_proc(ext2_filsys fs, blk_t *blocknr,
-			        e2_blkcnt_t blockcnt, blk_t ref_block,
+static int ext2_block_iterate_proc(ext2_filsys fs, blk64_t *blocknr,
+			        e2_blkcnt_t blockcnt, blk64_t ref_block,
 			        int ref_offset, void *priv_data)
 {
 	int ret;
@@ -323,7 +323,7 @@ static int ext2_create_file_extents(struct btrfs_trans_handle *trans,
 	init_blk_iterate_data(&data, trans, root, btrfs_inode, objectid,
 			convert_flags & CONVERT_FLAG_DATACSUM);
 
-	err = ext2fs_block_iterate2(ext2_fs, ext2_ino, BLOCK_FLAG_DATA_ONLY,
+	err = ext2fs_block_iterate3(ext2_fs, ext2_ino, BLOCK_FLAG_DATA_ONLY,
 				    NULL, ext2_block_iterate_proc, &data);
 	if (err)
 		goto error;
